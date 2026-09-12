@@ -1,0 +1,263 @@
+'use strict';
+require('dotenv').config();
+const crypto = require('crypto');
+const express = require('express');
+const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { transact } = require('./db');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET;
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://diremess.win,https://www.diremess.win')
+  .split(',')
+  .map((s) => s.trim());
+const MAX_GROUP_MEMBERS = 50;
+
+if (!JWT_SECRET) {
+  console.error('Missing JWT_SECRET environment variable. Set it before starting the server.');
+  process.exit(1);
+}
+
+app.use(express.json());
+app.use(cors({ origin: ALLOWED_ORIGINS }));
+
+const USERNAME_RE = /^[a-zA-Z0-9_]{3,32}$/;
+
+function signToken(username) {
+  return jwt.sign({ username }, JWT_SECRET, { expiresIn: '30d' });
+}
+
+function auth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const [, token] = header.split(' ');
+  if (!token) return res.status(401).json({ error: 'session expired' });
+  try {
+    req.username = jwt.verify(token, JWT_SECRET).username;
+    next();
+  } catch {
+    return res.status(401).json({ error: 'session expired' });
+  }
+}
+
+// ---- account creation ----
+app.post('/api/register', async (req, res) => {
+  const { username, password } = req.body || {};
+  if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
+    return res.status(400).json({ error: 'Username must be 3-32 letters, numbers, or underscores.' });
+  }
+  if (typeof password !== 'string' || password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  }
+  try {
+    const { conflict } = await transact(async (db) => {
+      if (db.users[username]) return { conflict: true };
+      const passwordHash = await bcrypt.hash(password, 10);
+      db.users[username] = { passwordHash, publicKey: null };
+      db.mailboxes[username] = [];
+      return { conflict: false };
+    });
+    if (conflict) return res.status(409).json({ error: 'That username is taken.' });
+    return res.json({ username, token: signToken(username) });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Registration failed.' });
+  }
+});
+
+// ---- login ----
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body || {};
+  if (typeof username !== 'string' || typeof password !== 'string') {
+    return res.status(400).json({ error: 'Username and password are required.' });
+  }
+  try {
+    const { ok } = await transact(async (db) => {
+      const user = db.users[username];
+      if (!user) return { ok: false };
+      return { ok: await bcrypt.compare(password, user.passwordHash) };
+    });
+    if (!ok) return res.status(401).json({ error: 'Invalid username or password.' });
+    return res.json({ username, token: signToken(username) });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Login failed.' });
+  }
+});
+
+// ---- public key upload/lookup ----
+app.post('/api/publickey', auth, async (req, res) => {
+  const { publicKey } = req.body || {};
+  if (!publicKey) return res.status(400).json({ error: 'publicKey is required.' });
+  await transact((db) => {
+    if (db.users[req.username]) db.users[req.username].publicKey = publicKey;
+  });
+  return res.json({ ok: true });
+});
+
+app.get('/api/publickey/:username', async (req, res) => {
+  const user = await transact((db) => db.users[req.params.username] || null);
+  if (!user || !user.publicKey) return res.status(404).json({ error: 'User not found.' });
+  return res.json({ publicKey: user.publicKey });
+});
+
+// ---- groups ----
+// Note on the E2E model: message CONTENT is always end-to-end encrypted —
+// a group message is just the same plaintext encrypted separately to each
+// member with the existing pairwise ECDH keys (fan-out), so the server never
+// gains the ability to read anything it couldn't already read in a 1:1 chat.
+// Group *metadata* (name, member list) is necessarily visible to the server,
+// since it has to validate membership to route messages — the same way it
+// already knows who your contacts are from who you talk to.
+app.post('/api/groups', auth, async (req, res) => {
+  const { name, members } = req.body || {};
+  const trimmedName = typeof name === 'string' ? name.trim() : '';
+  if (!trimmedName || trimmedName.length > 80) {
+    return res.status(400).json({ error: 'Group name must be 1-80 characters.' });
+  }
+  if (!Array.isArray(members) || members.length === 0) {
+    return res.status(400).json({ error: 'Add at least one other member.' });
+  }
+  const uniqueMembers = Array.from(new Set(members.filter((m) => typeof m === 'string')));
+  for (const m of uniqueMembers) {
+    if (!USERNAME_RE.test(m)) return res.status(400).json({ error: `Invalid username: ${m}` });
+  }
+  const allMembers = Array.from(new Set([req.username, ...uniqueMembers]));
+  if (allMembers.length > MAX_GROUP_MEMBERS) {
+    return res.status(400).json({ error: `Groups are limited to ${MAX_GROUP_MEMBERS} members.` });
+  }
+  try {
+    const { error, group } = await transact(async (db) => {
+      for (const m of allMembers) {
+        if (!db.users[m]) return { error: `No such user: ${m}` };
+      }
+      const id = crypto.randomUUID();
+      const g = { id, name: trimmedName, owner: req.username, members: allMembers, createdAt: Date.now() };
+      db.groups[id] = g;
+      for (const m of allMembers) {
+        if (m === req.username) continue;
+        db.mailboxes[m] = db.mailboxes[m] || [];
+        db.mailboxes[m].push({ system: 'group-invite', group: g, ts: Date.now() });
+      }
+      return { group: g };
+    });
+    if (error) return res.status(400).json({ error });
+    return res.json({ group });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Could not create group.' });
+  }
+});
+
+// List groups the caller belongs to (useful to resync on a fresh device).
+app.get('/api/groups', auth, async (req, res) => {
+  const groups = await transact((db) => Object.values(db.groups).filter((g) => g.members.includes(req.username)));
+  return res.json({ groups });
+});
+
+app.get('/api/groups/:id', auth, async (req, res) => {
+  const group = await transact((db) => db.groups[req.params.id] || null);
+  if (!group || !group.members.includes(req.username)) {
+    return res.status(404).json({ error: 'Group not found.' });
+  }
+  return res.json({ group });
+});
+
+app.post('/api/groups/:id/members', auth, async (req, res) => {
+  const { username } = req.body || {};
+  if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
+    return res.status(400).json({ error: 'A valid username is required.' });
+  }
+  try {
+    const { error, group } = await transact(async (db) => {
+      const g = db.groups[req.params.id];
+      if (!g || !g.members.includes(req.username)) return { error: 'not-found' };
+      if (!db.users[username]) return { error: `No such user: ${username}` };
+      if (g.members.includes(username)) return { error: `${username} is already in the group.` };
+      if (g.members.length >= MAX_GROUP_MEMBERS) return { error: `Groups are limited to ${MAX_GROUP_MEMBERS} members.` };
+      g.members.push(username);
+      // New member gets the full invite; existing members get an update so
+      // their local member list (and future fan-out sends) stay in sync.
+      db.mailboxes[username] = db.mailboxes[username] || [];
+      db.mailboxes[username].push({ system: 'group-invite', group: g, ts: Date.now() });
+      for (const m of g.members) {
+        if (m === req.username || m === username) continue;
+        db.mailboxes[m] = db.mailboxes[m] || [];
+        db.mailboxes[m].push({ system: 'group-update', group: g, ts: Date.now() });
+      }
+      return { group: g };
+    });
+    if (error === 'not-found') return res.status(404).json({ error: 'Group not found.' });
+    if (error) return res.status(400).json({ error });
+    return res.json({ group });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Could not add member.' });
+  }
+});
+
+// ---- send / poll (ciphertext relay only) ----
+app.post('/api/send', auth, async (req, res) => {
+  const { to, ciphertext, iv, groupId, messages } = req.body || {};
+
+  // Group send: the client has already encrypted the plaintext separately
+  // for each member using the existing pairwise keys. We just validate
+  // membership and fan the pre-encrypted copies out to each recipient's
+  // mailbox — the server still never sees plaintext.
+  if (groupId) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages array is required for group sends.' });
+    }
+    for (const m of messages) {
+      if (!m || typeof m.to !== 'string' || !m.ciphertext || !m.iv) {
+        return res.status(400).json({ error: 'Each group message needs to, ciphertext, and iv.' });
+      }
+    }
+    try {
+      const { error } = await transact((db) => {
+        const g = db.groups[groupId];
+        if (!g || !g.members.includes(req.username)) return { error: 'not-found' };
+        for (const m of messages) {
+          if (!g.members.includes(m.to)) return { error: `${m.to} is not in this group.` };
+        }
+        const msgId = crypto.randomUUID();
+        for (const m of messages) {
+          db.mailboxes[m.to] = db.mailboxes[m.to] || [];
+          db.mailboxes[m.to].push({ from: req.username, groupId, msgId, ciphertext: m.ciphertext, iv: m.iv, ts: Date.now() });
+        }
+        return { error: null };
+      });
+      if (error === 'not-found') return res.status(404).json({ error: 'Group not found.' });
+      if (error) return res.status(400).json({ error });
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: 'Send failed.' });
+    }
+  }
+
+  // Direct message.
+  if (!to || !ciphertext || !iv) {
+    return res.status(400).json({ error: 'to, ciphertext, and iv are required.' });
+  }
+  const { exists } = await transact((db) => {
+    if (!db.users[to]) return { exists: false };
+    db.mailboxes[to] = db.mailboxes[to] || [];
+    db.mailboxes[to].push({ from: req.username, ciphertext, iv, ts: Date.now() });
+    return { exists: true };
+  });
+  if (!exists) return res.status(404).json({ error: 'No such user.' });
+  return res.json({ ok: true });
+});
+
+app.get('/api/poll', auth, async (req, res) => {
+  const messages = await transact((db) => {
+    const msgs = db.mailboxes[req.username] || [];
+    db.mailboxes[req.username] = [];
+    return msgs;
+  });
+  return res.json({ messages });
+});
+
+app.listen(PORT, () => console.log(`Relay server listening on port ${PORT}`));
