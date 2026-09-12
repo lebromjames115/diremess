@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Relay — private messages</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,500;0,600;1,500&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+  <!-- AUTH SCREEN -->
+  <main id="auth-screen" class="auth-screen">
+    <section class="auth-hero">
+      <p class="wordmark">Relay</p>
+      <p class="hero-line">Everything below is encrypted on your device before it ever reaches this server.</p>
+      <p class="hero-detail">Relay stores your username and an encrypted mailbox. It never sees a plaintext message, and it never holds a key that could read one — those stay in your browser.</p>
+    </section>
+    <section class="auth-form-wrap">
+      <div class="auth-tabs">
+        <button id="tab-login" class="auth-tab active" type="button">Log in</button>
+        <button id="tab-register" class="auth-tab" type="button">Create account</button>
+      </div>
+      <form id="auth-form" class="auth-form" autocomplete="off">
+        <label class="field">
+          <span>Username</span>
+          <input id="username-input" type="text" name="username" required minlength="3" maxlength="32" autocomplete="username" />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input id="password-input" type="password" name="password" required minlength="8" autocomplete="current-password" />
+        </label>
+        <p id="auth-error" class="form-error" hidden></p>
+        <button id="auth-submit" type="submit" class="btn-primary">Log in</button>
+      </form>
+    </section>
+  </main>
+
+  <!-- APP SCREEN -->
+  <div id="app-screen" class="app-shell" hidden>
+    <aside class="sidebar">
+      <div class="identity-row">
+        <span class="wordmark small">Relay</span>
+        <button id="logout-btn" class="link-btn" type="button">Log out</button>
+      </div>
+      <div class="whoami">Signed in as <strong id="whoami-username"></strong></div>
+
+      <form id="new-convo-form" class="new-convo">
+        <span class="new-convo-label">Start a conversation</span>
+        <div class="search-field">
+          <svg class="search-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <input id="new-convo-input" type="text" placeholder="Enter a username" autocomplete="off" />
+        </div>
+      </form>
+      <p id="new-convo-error" class="form-error small" hidden></p>
+
+      <ul id="contact-list" class="contact-list"></ul>
+
+      <button id="forget-device-btn" class="link-btn danger" type="button">Forget this account on this device</button>
+    </aside>
+
+    <section class="conversation">
+      <div class="conversation-empty" id="conversation-empty">
+        <p class="wordmark small">Relay</p>
+        <p>Pick a contact, or start a new conversation by username.</p>
+      </div>
+      <div class="conversation-active" id="conversation-active" hidden>
+        <header class="conversation-header">
+          <button id="back-to-contacts-btn" class="link-btn back-btn" type="button" aria-label="Back to contacts">&larr;</button>
+          <div>
+            <p class="contact-name" id="contact-name"></p>
+            <button id="show-fingerprint-btn" class="link-btn tiny" type="button">Verify safety code</button>
+          </div>
+        </header>
+        <div id="fingerprint-panel" class="fingerprint-panel" hidden>
+          <p>Compare this code with <strong id="fingerprint-contact-name"></strong> over another channel — in person, or a phone call. If it matches on both ends, no one is in the middle of your keys.</p>
+          <pre id="fingerprint-value" class="fingerprint-value"></pre>
+        </div>
+        <div class="message-log" id="message-log"></div>
+        <form id="composer" class="composer">
+          <textarea id="composer-input" placeholder="Write a message" rows="1" required></textarea>
+          <button type="submit" class="btn-primary">Send</button>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
